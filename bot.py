@@ -426,7 +426,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_chat_action(update.effective_chat.id, "typing")
             reply = groq_client.groq_chat(text)
             log.info("groq reply len=%s", len(reply))
-            await update.message.reply_text(reply, parse_mode="HTML")
+            # Groq may return raw HTML tags (e.g. <spotify-link>) not allowed by Telegram HTML
+            try:
+                await update.message.reply_text(reply, parse_mode="HTML")
+            except Exception as html_e:
+                log.warning("HTML send failed (%s), fallback plain", html_e)
+                await update.message.reply_text(reply)  # plain, no parse
             return
         except Exception as e:
             log.warning("AI reply failed: %s", e)
