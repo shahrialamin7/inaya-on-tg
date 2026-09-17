@@ -87,6 +87,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log.info("help_cmd from %s chat %s", update.effective_user.id, update.effective_chat.id)
     cfg = _load_cfg()
     prefix = cfg.get("prefix", "/")
     ai_model = cfg.get("ai_chat",{}).get("model", GROQ_MODEL)
