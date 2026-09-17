@@ -502,24 +502,29 @@ def main():
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
 
-    if webhook_url:
-        # webhook mode — Render expects web service on PORT
-        port = int(os.getenv("PORT", "10000"))
-        # ensure webhook_url ends without trailing slash
-        webhook_url = webhook_url.rstrip("/")
-        # Telegram webhook path is /webhook/<token> for security — must match
-        url_path = f"webhook/{BOT_TOKEN.split(':')[-1]}"
-        print(f"Pro Bot webhook mode → {webhook_url}/{url_path} on :{port}")
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=port,
-            url_path=url_path,
-            webhook_url=f"{webhook_url}/{url_path}",
-            allowed_updates=["message","callback_query","chat_member"],
-        )
-    else:
-        print("Pro Bot polling (Miss Rose style)...")
-        app.run_polling()
+    # Health server for UptimeRobot + Render (always, polling mode)
+    import threading
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    import os as _os
+    port = int(_os.getenv("PORT", "10000"))
+    try:
+        with open("status.html","r",encoding="utf-8") as f:
+            STATUS_HTML = f.read()
+    except:
+        STATUS_HTML = "<html><body><h1>OK - Inaya On TG</h1></body></html>"
+    class Health(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-type","text/html")
+            self.end_headers()
+            try:
+                self.wfile.write(STATUS_HTML.encode())
+            except: pass
+        def log_message(self,*a): pass
+    threading.Thread(target=lambda: HTTPServer(("0.0.0.0", port), Health).serve_forever(), daemon=True).start()
+    print(f"Health HTML for UptimeRobot on :{port}/ → 200")
+    print("Pro Bot polling (Miss Rose style) — webhook disabled for stability")
+    app.run_polling()
 
 if __name__=="__main__":
     main()
