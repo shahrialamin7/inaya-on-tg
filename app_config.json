@@ -1,0 +1,49 @@
+{
+  "admin_ids": [
+    8882183155
+  ],
+  "bkash_number": "01XXXXXXXXX",
+  "methods": {
+    "sender_verify": {
+      "enabled": true,
+      "name": "Sender Number Verify",
+      "desc": "User sender number dibe, bot inbox e amount+sender match korbe",
+      "icon": "📱"
+    },
+    "trxid_verify": {
+      "enabled": true,
+      "name": "TrxID Verify",
+      "desc": "User TrxID dibe, bot internal API er TrxID er sathe match korbe",
+      "icon": "🆔"
+    },
+    "amount_auto": {
+      "enabled": true,
+      "name": "Auto Amount Detect",
+      "desc": "Amount dilei bot auto inbox poll kore payment detect korbe",
+      "icon": "⚡"
+    },
+    "dual_verify": {
+      "enabled": false,
+      "name": "Sender + TrxID Dual",
+      "desc": "Sender number + TrxID 2 tai match korte hobe",
+      "icon": "🔐"
+    }
+  },
+  "predefined_amounts": [
+    100,
+    500,
+    1000,
+    2000
+  ],
+  "ai_chat": {
+    "enabled": true,
+    "model": "openai/gpt-oss-20b"
+  },
+  "prefix": "/",
+  "prefixes": ["/", "!", "."] ,
+  "messages": {
+    "welcome": "👋 <b>Welcome to bKash Auto Payment Bot</b>\n\nPay korte niche Pay button e click koro.",
+    "pay_success": "✅ <b>Payment Received!</b>\n\n💰 Amount: {amount} Tk\n🆔 TrxID: {trxID}\n👤 Sender: {sender}",
+    "pay_failed": "❌ <b>Payment Not Found</b>\n\nAmount {amount} Tk er kono transaction pai nai. TrxID/Sender check kore abar try koro."
+  }
+}

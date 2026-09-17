@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+.tokens.json
+seen_trx.json
+pending.json
+probot.db
+*.log
+.venv/
