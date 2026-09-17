@@ -493,23 +493,33 @@ def main():
     # also handle notes with # prefix
     app.add_handler(MessageHandler(tg_filters.Regex(r"^#\w+"), get_note))
 
-    print("Pro Bot polling (Miss Rose style)...")
-    # Render health check: start simple HTTP server on PORT
-    import os, threading
-    from http.server import HTTPServer, BaseHTTPRequestHandler
-    port = int(os.getenv("PORT", "10000"))
-    class Health(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
-        def log_message(self, *a): pass
-    threading.Thread(target=lambda: HTTPServer(("0.0.0.0", port), Health).serve_forever(), daemon=True).start()
-    # Fix for Python 3.14 event loop
-    import asyncio
+    # Use webhook on Render (WEBHOOK_URL set), polling locally
+    import os, asyncio
+    webhook_url = os.getenv("WEBHOOK_URL") or os.getenv("RENDER_EXTERNAL_URL")
+    # Fix for Python 3.14
     try:
         asyncio.get_event_loop()
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
-    app.run_polling()
+
+    if webhook_url:
+        # webhook mode — Render expects web service on PORT
+        port = int(os.getenv("PORT", "10000"))
+        # ensure webhook_url ends without trailing slash
+        webhook_url = webhook_url.rstrip("/")
+        # Telegram webhook path is /webhook/<token> for security
+        url_path = BOT_TOKEN.split(":")[-1]  # use token suffix as path
+        print(f"Pro Bot webhook mode → {webhook_url}/webhook/{url_path} on :{port}")
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=url_path,
+            webhook_url=f"{webhook_url}/webhook/{url_path}",
+            allowed_updates=["message","callback_query","chat_member"],
+        )
+    else:
+        print("Pro Bot polling (Miss Rose style)...")
+        app.run_polling()
 
 if __name__=="__main__":
     main()
