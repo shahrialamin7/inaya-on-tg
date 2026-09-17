@@ -502,7 +502,7 @@ def main():
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
 
-    # Health server for UptimeRobot + Render (always, polling mode)
+    # Health server for UptimeRobot + polling (stable for Render free)
     import threading
     from http.server import HTTPServer, BaseHTTPRequestHandler
     import os as _os
@@ -523,7 +523,9 @@ def main():
         def log_message(self,*a): pass
     threading.Thread(target=lambda: HTTPServer(("0.0.0.0", port), Health).serve_forever(), daemon=True).start()
     print(f"Health HTML for UptimeRobot on :{port}/ → 200")
-    print("Pro Bot polling (Miss Rose style) — webhook disabled for stability")
+    # Always use polling on Render (webhook needs extra port, causes 409 Conflict)
+    # Polling + health server is enough for UptimeRobot to keep free instance awake
+    print("Pro Bot polling (Miss Rose style) — stable")
     app.run_polling()
 
 if __name__=="__main__":
