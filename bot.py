@@ -392,6 +392,7 @@ async def setprefix(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
+    log.info("text_handler text=%r chat=%s user=%s", text[:100], update.effective_chat.id, update.effective_user.id)
     if not text:
         return
     # filter check
@@ -423,9 +424,16 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_chat_action(update.effective_chat.id, "typing")
             reply = groq_client.groq_chat(text)
+            log.info("groq reply len=%s", len(reply))
             await update.message.reply_text(reply, parse_mode="HTML")
+            return
         except Exception as e:
             log.warning("AI reply failed: %s", e)
+            await update.message.reply_text(f"⚠️ AI error: {e}")
+            return
+    # fallback if AI disabled
+    log.info("AI disabled, fallback reply")
+    await update.message.reply_text("👋 Hi! Use /help to see commands")
 
 async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -489,7 +497,17 @@ def main():
     cmd(["id", "uid", "tgid", "tg_id"], uid_checker)
     cmd(["info"], info_cmd)
 
+    async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+        log.exception("handler error for update %s: %s", update, context.error)
+
+    app.add_error_handler(_on_error)
     app.add_handler(CallbackQueryHandler(callback))
+    # log all updates for debug
+    async def _log_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        log.info("recv update_id=%s chat=%s user=%s text=%r", update.update_id, update.effective_chat.id if update.effective_chat else None, update.effective_user.id if update.effective_user else None, (update.message.text[:80] if update.message and update.message.text else ""))
+    # add as first handler to log everything (group=-1)
+    from telegram.ext import TypeHandler
+    app.add_handler(TypeHandler(Update, _log_update), group=-1)
     app.add_handler(MessageHandler(tg_filters.TEXT & ~tg_filters.COMMAND, text_handler))
     app.add_handler(MessageHandler(tg_filters.Regex(r"^#\w+"), get_note))
 
