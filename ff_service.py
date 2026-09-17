@@ -1,8 +1,13 @@
-import json, urllib.request
+import json, urllib.request, urllib.error
 UPSTREAM = "https://wzapiinfo.vercel.app"
 def fetch_ff(uid: str):
-    with urllib.request.urlopen(f"{UPSTREAM}/get?uid={uid}", timeout=8) as r:
-        raw = json.loads(r.read().decode())
+    try:
+        with urllib.request.urlopen(f"{UPSTREAM}/get?uid={uid}", timeout=8) as r:
+            raw = json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        raise ValueError(f"FF API HTTP {e.code}") from e
+    except urllib.error.URLError as e:
+        raise ValueError(f"FF network error: {e.reason}") from e
     if not raw.get("basic_info"):
         raise ValueError("Player not found")
     b = raw["basic_info"]

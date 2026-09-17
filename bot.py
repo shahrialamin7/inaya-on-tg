@@ -1,30 +1,75 @@
 #!/usr/bin/env python3
-import logging, re
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+import json, logging, re, threading, os, asyncio
+from pathlib import Path
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes
 import telegram.ext.filters as tg_filters
-from config import BOT_TOKEN, ADMIN_IDS
-from database import db
+from config import BOT_TOKEN, ADMIN_IDS, GROQ_MODEL, ALLOWED_MODELS
+from database import db, _db_lock
 import groq_client
 import ff_service
 import spoti_service
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger("pro-bot")
 
+CONFIG_PATH = Path("app_config.json")
+CFG_LOCK = threading.Lock()
+
 # --- Helpers ---
+def _load_cfg():
+    with CFG_LOCK:
+        try:
+            with open(CONFIG_PATH, encoding="utf-8") as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            log.warning("config load failed: %s", e)
+            return {}
+
+def _save_cfg(cfg: dict):
+    with CFG_LOCK:
+        tmp = CONFIG_PATH.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+        tmp.replace(CONFIG_PATH)
+
+def _update_env(key: str, value: str):
+    env_path = Path(".env")
+    try:
+        content = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+        lines = content.splitlines()
+        found = False
+        for i, l in enumerate(lines):
+            if l.startswith(f"{key}="):
+                lines[i] = f"{key}={value}"
+                found = True
+                break
+        if not found:
+            lines.append(f"{key}={value}")
+        tmp = env_path.with_suffix(".tmp")
+        tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        tmp.replace(env_path)
+    except OSError as e:
+        log.error("env write failed %s: %s", key, e)
+
+async def _is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if update.effective_user and update.effective_user.id in ADMIN_IDS:
+        return True
+    if not update.effective_chat or update.effective_chat.type == "private":
+        return False
+    try:
+        m = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
+        return m.status in ("administrator", "creator")
+    except Exception as e:
+        log.debug("get_chat_member failed: %s", e)
+        return False
+
 def admin_only(func):
     async def w(update, context):
-        if update.effective_user.id not in ADMIN_IDS:
-            # also check group admin
-            try:
-                m = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
-                if m.status not in ["administrator","creator"]:
-                    await update.message.reply_text("❌ Admin only")
-                    return
-            except:
-                await update.message.reply_text("❌ Admin only")
-                return
+        if not await _is_admin(update, context):
+            await update.message.reply_text("❌ Admin only")
+            return
         return await func(update, context)
     return w
 
@@ -42,13 +87,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    import json
-    cfg = {}
-    try:
-        cfg = json.load(open("app_config.json"))
-    except: pass
+    cfg = _load_cfg()
     prefix = cfg.get("prefix", "/")
-    ai_model = cfg.get("ai_chat",{}).get("model","openai/gpt-oss-20b")
+    ai_model = cfg.get("ai_chat",{}).get("model", GROQ_MODEL)
     text = (
         f"📖 <b>All Commands</b> (Prefix: <code>{prefix}</code>)\n\n"
         "<b>👮 Admin</b>\n"
@@ -100,7 +141,10 @@ async def mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Reply to mute")
         return
     user = update.message.reply_to_message.from_user
-    await context.bot.restrict_chat_member(update.effective_chat.id, user.id, permissions=None)
+    await context.bot.restrict_chat_member(
+        update.effective_chat.id, user.id,
+        permissions=ChatPermissions(can_send_messages=False)
+    )
     await update.message.reply_text(f"🔇 Muted {user.mention_html()}", parse_mode="HTML")
 
 # --- Warns ---
@@ -110,15 +154,18 @@ async def warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     chat_id = update.effective_chat.id
     user = update.message.reply_to_message.from_user
-    con = db(); cur = con.cursor()
-    cur.execute("INSERT OR IGNORE INTO warns VALUES (?,?,0)", (chat_id, user.id))
-    cur.execute("UPDATE warns SET count=count+1 WHERE chat_id=? AND user_id=?", (chat_id, user.id))
-    cur.execute("SELECT count FROM warns WHERE chat_id=? AND user_id=?", (chat_id, user.id))
-    cnt = cur.fetchone()[0]
-    con.commit(); con.close()
+    with _db_lock:
+        con = db(); cur = con.cursor()
+        cur.execute("INSERT OR IGNORE INTO warns VALUES (?,?,0)", (chat_id, user.id))
+        cur.execute("UPDATE warns SET count=count+1 WHERE chat_id=? AND user_id=?", (chat_id, user.id))
+        cur.execute("SELECT count FROM warns WHERE chat_id=? AND user_id=?", (chat_id, user.id))
+        cnt = cur.fetchone()[0]
+        con.commit(); con.close()
     await update.message.reply_text(f"⚠️ Warn {cnt}/3 for {user.mention_html()}", parse_mode="HTML")
     if cnt >= 3:
-        await context.bot.restrict_chat_member(chat_id, user.id, permissions=None)
+        await context.bot.restrict_chat_member(
+            chat_id, user.id, permissions=ChatPermissions(can_send_messages=False)
+        )
         await update.message.reply_text("🔇 3 warns → muted")
 
 async def warns(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -126,6 +173,7 @@ async def warns(update: Update, context: ContextTypes.DEFAULT_TYPE):
     con = db(); cur = con.cursor()
     cur.execute("SELECT count FROM warns WHERE chat_id=? AND user_id=?", (update.effective_chat.id, user.id))
     row = cur.fetchone()
+    con.close()
     cnt = row[0] if row else 0
     await update.message.reply_text(f"Warns for {user.mention_html()}: {cnt}/3", parse_mode="HTML")
 
@@ -136,11 +184,12 @@ async def filter_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     kw = context.args[0].lower()
     reply = " ".join(context.args[1:])
-    con = db(); con.execute("INSERT OR REPLACE INTO filters VALUES (?,?,?)", (update.effective_chat.id, kw, reply)); con.commit(); con.close()
+    with _db_lock:
+        con = db(); con.execute("INSERT OR REPLACE INTO filters VALUES (?,?,?)", (update.effective_chat.id, kw, reply)); con.commit(); con.close()
     await update.message.reply_text(f"✅ Filter saved: {kw}")
 
 async def list_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    con = db(); rows = con.execute("SELECT keyword FROM filters WHERE chat_id=?", (update.effective_chat.id,)).fetchall()
+    con = db(); rows = con.execute("SELECT keyword FROM filters WHERE chat_id=?", (update.effective_chat.id,)).fetchall(); con.close()
     await update.message.reply_text("Filters: " + ", ".join([r[0] for r in rows]) if rows else "No filters")
 
 # --- Notes ---
@@ -150,14 +199,15 @@ async def save(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     name = context.args[0].lower()
     content = " ".join(context.args[1:])
-    con = db(); con.execute("INSERT OR REPLACE INTO notes VALUES (?,?,?)", (update.effective_chat.id, name, content)); con.commit(); con.close()
+    with _db_lock:
+        con = db(); con.execute("INSERT OR REPLACE INTO notes VALUES (?,?,?)", (update.effective_chat.id, name, content)); con.commit(); con.close()
     await update.message.reply_text(f"✅ Saved #{name}")
 
 async def get_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
+    text = update.message.text or ""
     if text.startswith("#"):
         name = text[1:].split()[0].lower()
-        con = db(); row = con.execute("SELECT content FROM notes WHERE chat_id=? AND name=?", (update.effective_chat.id, name)).fetchone()
+        con = db(); row = con.execute("SELECT content FROM notes WHERE chat_id=? AND name=?", (update.effective_chat.id, name)).fetchone(); con.close()
         if row:
             await update.message.reply_text(row[0])
 
@@ -172,6 +222,7 @@ async def ffinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = ff_service.format_ff(uid)
         await update.message.reply_text(msg, parse_mode="HTML")
     except Exception as e:
+        log.warning("ffinfo %s failed: %s", uid, e)
         await update.message.reply_text(f"❌ FF error: {e}")
 
 # --- SpotiFLAC ---
@@ -192,96 +243,77 @@ async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- AI ---
 async def ai_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # simple toggle via file
-    import json, os
-    cfg_path = "app_config.json"
-    try:
-        with open(cfg_path) as f:
-            cfg = json.load(f)
-    except:
-        cfg = {"ai_chat":{"enabled":True}}
-    cur = cfg.get("ai_chat",{}).get("enabled",True)
+    cfg = _load_cfg() or {"ai_chat": {"enabled": True}}
+    cur = cfg.get("ai_chat", {}).get("enabled", True)
     new = not cur
-    cfg["ai_chat"] = {"enabled": new, "model":"openai/gpt-oss-20b"}
-    with open(cfg_path,"w") as f:
-        json.dump(cfg,f,indent=2)
+    cfg.setdefault("ai_chat", {})["enabled"] = new
+    cfg["ai_chat"].setdefault("model", GROQ_MODEL)
+    _save_cfg(cfg)
     await update.message.reply_text(f"{'✅ AI ON' if new else '❌ AI OFF'}")
 
 async def ai_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    import json
-    cfg=json.load(open("app_config.json"))
-    cfg["ai_chat"]["enabled"]=True
-    open("app_config.json","w").write(json.dumps(cfg,indent=2))
+    cfg = _load_cfg()
+    cfg.setdefault("ai_chat", {})["enabled"] = True
+    _save_cfg(cfg)
     await update.message.reply_text("✅ AI Enabled")
 
 async def ai_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    import json
-    cfg=json.load(open("app_config.json"))
-    cfg["ai_chat"]["enabled"]=False
-    open("app_config.json","w").write(json.dumps(cfg,indent=2))
+    cfg = _load_cfg()
+    cfg.setdefault("ai_chat", {})["enabled"] = False
+    _save_cfg(cfg)
     await update.message.reply_text("❌ AI Disabled")
 
 async def setmodel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    import json
-    if not await is_admin_check(update, context):
+    if not await _is_admin(update, context):
         await update.message.reply_text("❌ Admin only")
         return
-    models = ["openai/gpt-oss-20b","openai/gpt-oss-120b","qwen/qwen3.8-27b","groq/compound","groq/compound-mini","allam-2-7b"]
+    models = ALLOWED_MODELS
     if not context.args:
-        cfg=json.load(open("app_config.json"))
-        cur=cfg.get("ai_chat",{}).get("model","openai/gpt-oss-20b")
-        kb=[[InlineKeyboardButton(f"{'✅ ' if m==cur else ''}{m}", callback_data=f"setmodel_{m}")] for m in models]
+        cfg = _load_cfg()
+        cur = cfg.get("ai_chat", {}).get("model", GROQ_MODEL)
+        kb = [[InlineKeyboardButton(f"{'✅ ' if m==cur else ''}{m}", callback_data=f"setmodel_{m}")] for m in models]
         await update.message.reply_text(f"🤖 Current model: <code>{cur}</code>\nSelect new model:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
         return
     new = context.args[0].strip()
     if new not in models:
         await update.message.reply_text(f"❌ Invalid model. Available:\n" + "\n".join(models))
         return
-    cfg=json.load(open("app_config.json"))
-    cfg["ai_chat"]["model"]=new
-    open("app_config.json","w").write(json.dumps(cfg,indent=2, ensure_ascii=False))
-    # also update .env for groq_client
-    try:
-        env=open(".env").read()
-        if "GROQ_MODEL" in env:
-            env="\n".join([f"GROQ_MODEL={new}" if l.startswith("GROQ_MODEL") else l for l in env.split("\n")])
-        else:
-            env+=f"\nGROQ_MODEL={new}\n"
-        open(".env","w").write(env)
-    except: pass
+    cfg = _load_cfg()
+    cfg.setdefault("ai_chat", {})["model"] = new
+    _save_cfg(cfg)
+    _update_env("GROQ_MODEL", new)
     await update.message.reply_text(f"✅ AI model changed to <code>{new}</code>", parse_mode="HTML")
 
 async def models_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    models = ["openai/gpt-oss-20b","openai/gpt-oss-120b","qwen/qwen3.8-27b","groq/compound","groq/compound-mini","allam-2-7b"]
-    import json
-    cfg=json.load(open("app_config.json"))
-    cur=cfg.get("ai_chat",{}).get("model","unknown")
+    models = ALLOWED_MODELS
+    cfg = _load_cfg()
+    cur = cfg.get("ai_chat", {}).get("model", "unknown")
     await update.message.reply_text("🤖 <b>Available Models</b> (Groq):\n" + "\n".join([f"{'✅ ' if m==cur else '▫️ '}<code>{m}</code>" for m in models]) + f"\n\nCurrent: <code>{cur}</code>\nUse: <code>/setmodel {models[0]}</code>", parse_mode="HTML")
 
 # --- Admin Add / Prefix Change ---
 async def addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    import json
-    if update.effective_user.id not in [8882183155] and not await is_admin(update, context):
+    if not await _is_admin(update, context):
         await update.message.reply_text("❌ Admin only")
         return
     target = None
     if update.message.reply_to_message:
         target = update.message.reply_to_message.from_user.id
     elif context.args:
-        try: target = int(context.args[0])
-        except: pass
+        try:
+            target = int(context.args[0])
+        except (ValueError, TypeError):
+            target = None
     if not target:
         await update.message.reply_text("Usage: Reply to user or /addadmin <user_id>")
         return
-    cfg = json.load(open("app_config.json"))
-    if target not in cfg["admin_ids"]:
-        cfg["admin_ids"].append(target)
-        open("app_config.json","w").write(json.dumps(cfg,indent=2, ensure_ascii=False))
+    cfg = _load_cfg()
+    if target not in cfg.get("admin_ids", []):
+        cfg.setdefault("admin_ids", []).append(target)
+        _save_cfg(cfg)
     await update.message.reply_text(f"✅ Added admin: <code>{target}</code>", parse_mode="HTML")
 
 async def removeadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    import json
-    if update.effective_user.id not in [8882183155]:
+    if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("❌ Creator only")
         return
     target = int(context.args[0]) if context.args and context.args[0].isdigit() else None
@@ -290,17 +322,16 @@ async def removeadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not target:
         await update.message.reply_text("Usage: /removeadmin <user_id> or reply")
         return
-    cfg = json.load(open("app_config.json"))
-    if target in cfg["admin_ids"]:
+    cfg = _load_cfg()
+    if target in cfg.get("admin_ids", []):
         cfg["admin_ids"].remove(target)
-        open("app_config.json","w").write(json.dumps(cfg,indent=2, ensure_ascii=False))
+        _save_cfg(cfg)
     await update.message.reply_text(f"✅ Removed admin: <code>{target}</code>", parse_mode="HTML")
 
 async def adminlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    import json
-    cfg = json.load(open("app_config.json"))
-    ids = cfg.get("admin_ids",[])
-    await update.message.reply_text("👮 Admins:\n" + "\n".join([f"• <code>{i}</code>" for i in ids]), parse_mode="HTML")
+    cfg = _load_cfg()
+    ids = cfg.get("admin_ids", [])
+    await update.message.reply_text("👮 Admins:\n" + "\n".join([f"• <code>{i}</code>" for i in ids]) if ids else "No admins", parse_mode="HTML")
 
 async def uid_checker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # /id, /uid, /tgid — shows Telegram IDs
@@ -343,190 +374,154 @@ async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await uid_checker(update, context)
 
 async def setprefix(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    import json
-    if not await is_admin_check(update, context):
+    if not await _is_admin(update, context):
         await update.message.reply_text("❌ Admin only")
         return
     if not context.args:
-        cfg = json.load(open("app_config.json"))
+        cfg = _load_cfg()
         await update.message.reply_text(f"Current prefix: <code>{cfg.get('prefix','/')}</code>\nUsage: /setprefix !  (or / . )", parse_mode="HTML")
         return
     new = context.args[0].strip()
-    if len(new)!=1 or new not in ["!",".","/","~","#","$"]:
+    if len(new) != 1 or new not in ["/", "!", ".", "~", "#", "$"]:
         await update.message.reply_text("❌ Prefix must be single char: / ! . ~ # $")
         return
-    cfg = json.load(open("app_config.json"))
+    cfg = _load_cfg()
     cfg["prefix"] = new
-    open("app_config.json","w").write(json.dumps(cfg,indent=2, ensure_ascii=False))
+    _save_cfg(cfg)
     await update.message.reply_text(f"✅ Prefix changed to <code>{new}</code> — now use {new}help", parse_mode="HTML")
 
-async def is_admin_check(update, context):
-    if update.effective_user.id in [8882183155]:
-        return True
-    try:
-        m = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
-        return m.status in ["administrator","creator"]
-    except:
-        return False
-
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
+    text = (update.message.text or "").strip()
+    if not text:
+        return
     # filter check
-    con = db(); row = con.execute("SELECT reply FROM filters WHERE chat_id=? AND lower(?) LIKE '%'||keyword||'%'", (update.effective_chat.id, text.lower())).fetchone()
+    con = db()
+    row = con.execute("SELECT reply FROM filters WHERE chat_id=? AND instr(lower(?), keyword) > 0", (update.effective_chat.id, text.lower())).fetchone()
+    con.close()
     if row:
         await update.message.reply_text(row[0])
         return
-    # note check done via separate handler, but also here for #note
     if text.startswith("#"):
         await get_note(update, context)
         return
-    # FF UID auto-detect
-    if text.isdigit() and len(text)>=9:
+    if text.isdigit() and len(text) >= 9:
         try:
             msg = ff_service.format_ff(text)
             await update.message.reply_text(msg, parse_mode="HTML")
             return
-        except: pass
-    # Spotify link auto
+        except Exception as e:
+            log.debug("auto ff failed %s: %s", text, e)
     if "open.spotify.com" in text:
         await download(update, context)
         return
-    # pay intent
-    import re
-    m=re.search(r"(\d{2,5})\s*(tk|taka)", text, re.I)
-    if m and any(k in text.lower() for k in ["pay","taka","tk"]):
+    m = re.search(r"(\d{2,5})\s*(tk|taka)", text, re.I)
+    if m and any(k in text.lower() for k in ["pay", "taka", "tk"]):
         await update.message.reply_text(f"💡 {m.group(1)} Tk pay detected! Use /pay for bKash flow")
         return
-    # AI fallback
-    import json
-    try:
-        cfg=json.load(open("app_config.json"))
-        if cfg.get("ai_chat",{}).get("enabled"):
+    cfg = _load_cfg()
+    if cfg.get("ai_chat", {}).get("enabled"):
+        try:
             await context.bot.send_chat_action(update.effective_chat.id, "typing")
             reply = groq_client.groq_chat(text)
             await update.message.reply_text(reply, parse_mode="HTML")
-    except:
-        pass
+        except Exception as e:
+            log.warning("AI reply failed: %s", e)
 
 async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    if q.data=="help":
+    if q.data == "help":
         await help_cmd(update, context)
-    elif q.data=="admin":
-        await update.callback_query.message.reply_text("Admin panel: /ban /warn /filter etc.")
+    elif q.data == "admin":
+        await q.message.reply_text("Admin panel: /ban /warn /filter etc.")
     elif q.data.startswith("setmodel_"):
-        import json
-        new=q.data.replace("setmodel_","")
-        cfg=json.load(open("app_config.json"))
-        cfg["ai_chat"]["model"]=new
-        open("app_config.json","w").write(json.dumps(cfg,indent=2, ensure_ascii=False))
-        try:
-            env=open(".env").read()
-            if "GROQ_MODEL" in env:
-                env="\n".join([f"GROQ_MODEL={new}" if l.startswith("GROQ_MODEL") else l for l in env.split("\n")])
-            else:
-                env+=f"\nGROQ_MODEL={new}\n"
-            open(".env","w").write(env)
-        except: pass
+        new = q.data.replace("setmodel_", "")
+        if new not in ALLOWED_MODELS:
+            await q.edit_message_text(f"❌ Invalid model: {new}")
+            return
+        cfg = _load_cfg()
+        cfg.setdefault("ai_chat", {})["model"] = new
+        _save_cfg(cfg)
+        _update_env("GROQ_MODEL", new)
         await q.edit_message_text(f"✅ AI model → <code>{new}</code>", parse_mode="HTML")
+
+async def _notes_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Notes via #name — use /save <name> <content> to create")
 
 def main():
     if not BOT_TOKEN:
-        print("Set TG_BOT_TOKEN in .env")
+        log.error("TG_BOT_TOKEN not set")
         return
     app = Application.builder().token(BOT_TOKEN).build()
-    # core — support multiple prefixes via custom handlers
-    import json
-    try:
-        cfg=json.load(open("app_config.json"))
-        prefixes=cfg.get("prefixes",["/","!","."])
-    except:
-        prefixes=["/","!","."]
-    # helper to register command with all prefixes
+    cfg = _load_cfg()
+    prefixes = cfg.get("prefixes", ["/", "!", "."])
     def cmd(names, func):
         for n in names:
             for p in prefixes:
-                # PTB CommandHandler only handles / by default, so we use MessageHandler for custom prefixes
-                if p=="/":
+                if p == "/":
                     app.add_handler(CommandHandler(n, func))
                 else:
                     app.add_handler(MessageHandler(tg_filters.Regex(rf"^{re.escape(p)}{n}(\s|$)"), func))
-    # core
     cmd(["start"], start)
-    cmd(["help","commands","cmd"], help_cmd)
-    # admin
+    cmd(["help", "commands", "cmd"], help_cmd)
     cmd(["ban"], ban)
     cmd(["unban"], unban)
     cmd(["mute"], mute)
-    # warns
     cmd(["warn"], warn)
-    cmd(["warns","warnings","resetwarn"], warns)
-    # filters/notes
+    cmd(["warns", "warnings", "resetwarn"], warns)
     cmd(["filter"], filter_cmd)
     cmd(["filters"], list_filters)
     cmd(["save"], save)
-    cmd(["notes"], lambda u,c: u.message.reply_text("Notes via #name"))
+    cmd(["notes"], _notes_list)
     cmd(["addadmin"], addadmin)
     cmd(["removeadmin"], removeadmin)
-    cmd(["adminlist","admins"], adminlist)
-    cmd(["setprefix","prefix"], setprefix)
-    # ff
+    cmd(["adminlist", "admins"], adminlist)
+    cmd(["setprefix", "prefix"], setprefix)
     cmd(["ffinfo"], ffinfo)
     cmd(["ff"], ffinfo)
     cmd(["player"], ffinfo)
-    # spotiflac
     cmd(["download"], download)
-    # ai
     cmd(["ai"], ai_toggle)
     cmd(["ai_on"], ai_on)
     cmd(["ai_off"], ai_off)
-    cmd(["setmodel","model"], setmodel)
-    cmd(["models","modelist"], models_cmd)
-    # uid checker
-    cmd(["id","uid","tgid","tg_id"], uid_checker)
+    cmd(["setmodel", "model"], setmodel)
+    cmd(["models", "modelist"], models_cmd)
+    cmd(["id", "uid", "tgid", "tg_id"], uid_checker)
     cmd(["info"], info_cmd)
-    # callbacks
+
     app.add_handler(CallbackQueryHandler(callback))
-    # text
     app.add_handler(MessageHandler(tg_filters.TEXT & ~tg_filters.COMMAND, text_handler))
-    # also handle notes with # prefix
     app.add_handler(MessageHandler(tg_filters.Regex(r"^#\w+"), get_note))
 
-    # Use webhook on Render (WEBHOOK_URL set), polling locally
-    import os, asyncio
-    webhook_url = os.getenv("WEBHOOK_URL") or os.getenv("RENDER_EXTERNAL_URL")
-    # Fix for Python 3.14
+    # Python 3.14 compat
     try:
         asyncio.get_event_loop()
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
 
-    # Health server for UptimeRobot + polling (stable for Render free)
-    import threading
-    from http.server import HTTPServer, BaseHTTPRequestHandler
-    import os as _os
-    port = int(_os.getenv("PORT", "10000"))
+    # Health server for UptimeRobot (Render) — separate thread, polling remains main loop
+    port = int(os.getenv("PORT", "10000"))
     try:
-        with open("status.html","r",encoding="utf-8") as f:
+        with open("status.html", encoding="utf-8") as f:
             STATUS_HTML = f.read()
-    except:
+    except (FileNotFoundError, OSError) as e:
+        log.warning("status.html missing: %s", e)
         STATUS_HTML = "<html><body><h1>OK - Inaya On TG</h1></body></html>"
     class Health(BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
-            self.send_header("Content-type","text/html")
+            self.send_header("Content-type", "text/html; charset=utf-8")
             self.end_headers()
             try:
                 self.wfile.write(STATUS_HTML.encode())
-            except: pass
-        def log_message(self,*a): pass
+            except BrokenPipeError:
+                pass
+        def log_message(self, *a):
+            pass
     threading.Thread(target=lambda: HTTPServer(("0.0.0.0", port), Health).serve_forever(), daemon=True).start()
-    print(f"Health HTML for UptimeRobot on :{port}/ → 200")
-    # Always use polling on Render (webhook needs extra port, causes 409 Conflict)
-    # Polling + health server is enough for UptimeRobot to keep free instance awake
-    print("Pro Bot polling (Miss Rose style) — stable")
-    app.run_polling()
+    log.info("Health HTML for UptimeRobot on :%s/", port)
+    log.info("Pro Bot polling (Miss Rose style)")
+    app.run_polling(allowed_updates=["message", "callback_query", "chat_member"])
 
 if __name__=="__main__":
     main()
