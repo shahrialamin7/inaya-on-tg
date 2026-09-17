@@ -69,8 +69,9 @@ class SpotiService:
         sflac_q = qmap.get(q, "LOSSLESS")
         out_dir = tempfile.mkdtemp(prefix="spoti_")
         try:
-            # Sync call — pass registry so extensions auto-install (tidal/deezer/qobuz etc)
-            _SpotiFLAC(spotify_url, out_dir, quality=sflac_q, embed_lyrics=l, log_level=20, registries=[self.registry_url])
+            # Use all download providers with fallback (tidal is rate-limited for LOSSLESS)
+            services = ["ext:deezer", "ext:qobuz-web", "ext:tidal-web", "ext:amazon", "ext:soundcloud", "ext:ytmusic-spotiflac"]
+            _SpotiFLAC(spotify_url, out_dir, quality=sflac_q, embed_lyrics=l, log_level=20, registries=[self.registry_url], services=services, allow_fallback=True)
             files = glob.glob(os.path.join(out_dir, "**", "*"), recursive=True)
             audio = [f for f in files if os.path.isfile(f) and f.lower().endswith((".flac",".wav",".mp3",".m4a",".ogg",".opus"))]
             if not audio:
