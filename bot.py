@@ -494,6 +494,21 @@ def main():
     app.add_handler(MessageHandler(tg_filters.Regex(r"^#\w+"), get_note))
 
     print("Pro Bot polling (Miss Rose style)...")
+    # Render health check: start simple HTTP server on PORT
+    import os, threading
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    port = int(os.getenv("PORT", "10000"))
+    class Health(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
+        def log_message(self, *a): pass
+    threading.Thread(target=lambda: HTTPServer(("0.0.0.0", port), Health).serve_forever(), daemon=True).start()
+    # Fix for Python 3.14 event loop
+    import asyncio
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
     app.run_polling()
 
 if __name__=="__main__":
