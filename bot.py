@@ -507,14 +507,14 @@ def main():
         port = int(os.getenv("PORT", "10000"))
         # ensure webhook_url ends without trailing slash
         webhook_url = webhook_url.rstrip("/")
-        # Telegram webhook path is /webhook/<token> for security
-        url_path = BOT_TOKEN.split(":")[-1]  # use token suffix as path
-        print(f"Pro Bot webhook mode → {webhook_url}/webhook/{url_path} on :{port}")
+        # Telegram webhook path is /webhook/<token> for security — must match
+        url_path = f"webhook/{BOT_TOKEN.split(':')[-1]}"
+        print(f"Pro Bot webhook mode → {webhook_url}/{url_path} on :{port}")
         app.run_webhook(
             listen="0.0.0.0",
             port=port,
             url_path=url_path,
-            webhook_url=f"{webhook_url}/webhook/{url_path}",
+            webhook_url=f"{webhook_url}/{url_path}",
             allowed_updates=["message","callback_query","chat_member"],
         )
     else:
