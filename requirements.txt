@@ -1,4 +1,5 @@
 python-telegram-bot==21.5
 httpx==0.28.1
 python-dotenv==1.0.1
+SpotiFLAC==4.2.3
 # NOTE: webhooks extra (tornado) not needed for polling; add only if webhook mode
