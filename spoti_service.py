@@ -69,8 +69,8 @@ class SpotiService:
         sflac_q = qmap.get(q, "LOSSLESS")
         out_dir = tempfile.mkdtemp(prefix="spoti_")
         try:
-            # Sync call — blocks until download finishes (handles extensions auto-sync)
-            _SpotiFLAC(spotify_url, out_dir, quality=sflac_q, embed_lyrics=l, log_level=20)
+            # Sync call — pass registry so extensions auto-install (tidal/deezer/qobuz etc)
+            _SpotiFLAC(spotify_url, out_dir, quality=sflac_q, embed_lyrics=l, log_level=20, registries=[self.registry_url])
             files = glob.glob(os.path.join(out_dir, "**", "*"), recursive=True)
             audio = [f for f in files if os.path.isfile(f) and f.lower().endswith((".flac",".wav",".mp3",".m4a",".ogg",".opus"))]
             if not audio:
