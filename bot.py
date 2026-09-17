@@ -116,7 +116,11 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{prefix}ai_on /ai_off /ai\n\n"
         f"Support: @ShahrialAmin | Prefix: {prefix} | Use {prefix}help for this"
     )
-    await update.message.reply_text(text, parse_mode="HTML")
+    kb = [
+        [InlineKeyboardButton("⚙️ Admin Panel", callback_data="admin"), InlineKeyboardButton("📖 Help", callback_data="help")],
+        [InlineKeyboardButton("🤖 AI Model", callback_data="admin_model"), InlineKeyboardButton("❌ Close", callback_data="admin_close")],
+    ]
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
 
 # --- Admin ---
 async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -291,6 +295,29 @@ async def models_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cur = cfg.get("ai_chat", {}).get("model", "unknown")
     await update.message.reply_text("🤖 <b>Available Models</b> (Groq):\n" + "\n".join([f"{'✅ ' if m==cur else '▫️ '}<code>{m}</code>" for m in models]) + f"\n\nCurrent: <code>{cur}</code>\nUse: <code>/setmodel {models[0]}</code>", parse_mode="HTML")
 
+# --- Admin Panel ---
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _is_admin(update, context):
+        await update.message.reply_text("❌ Admin only")
+        return
+    kb = [
+        [InlineKeyboardButton("👮 Ban", callback_data="admin_ban"), InlineKeyboardButton("🔓 Unban", callback_data="admin_unban"), InlineKeyboardButton("🔇 Mute", callback_data="admin_mute")],
+        [InlineKeyboardButton("⚠️ Warn", callback_data="admin_warn"), InlineKeyboardButton("📋 Warns", callback_data="admin_warns"), InlineKeyboardButton("🔧 Filters", callback_data="admin_filters")],
+        [InlineKeyboardButton("📝 Notes", callback_data="admin_notes"), InlineKeyboardButton("💾 Save", callback_data="admin_save"), InlineKeyboardButton("🔒 Locks", callback_data="admin_locks")],
+        [InlineKeyboardButton("🤖 AI ON", callback_data="admin_ai_on"), InlineKeyboardButton("🤖 AI OFF", callback_data="admin_ai_off"), InlineKeyboardButton("🧠 Model", callback_data="admin_model")],
+        [InlineKeyboardButton("👥 Admins", callback_data="admin_adminlist"), InlineKeyboardButton("➕ Add Admin", callback_data="admin_addadmin"), InlineKeyboardButton("⚙️ Prefix", callback_data="admin_prefix")],
+        [InlineKeyboardButton("📖 Help", callback_data="help"), InlineKeyboardButton("❌ Close", callback_data="admin_close")],
+    ]
+    await update.message.reply_text(
+        "⚙️ <b>Admin Panel</b>\n\n"
+        "Manage group — select action:\n"
+        "• Ban/Mute/Warn for moderation\n"
+        "• Filters/Notes for auto replies\n"
+        "• AI / Model / Prefix settings",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(kb),
+    )
+
 # --- Admin Add / Prefix Change ---
 async def addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _is_admin(update, context):
@@ -445,9 +472,53 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     if q.data == "help":
-        await help_cmd(update, context)
+        # help via callback — need to send as new message (q.message)
+        # create fake update style: reuse help_cmd logic but reply to callback message chat
+        cfg = _load_cfg()
+        prefix = cfg.get("prefix", "/")
+        ai_model = cfg.get("ai_chat", {}).get("model", GROQ_MODEL)
+        text = (
+            f"📖 <b>All Commands</b> (Prefix: <code>{prefix}</code>)\n\n"
+            f"<b>👮 Admin</b>\n{prefix}ban /unban /kick /mute /unmute\n"
+            f"{prefix}warn /warns /resetwarn (3 warns = mute)\n"
+            f"{prefix}addadmin /removeadmin /adminlist\n"
+            f"{prefix}setprefix | {prefix}setmodel | {prefix}models\n"
+            f"{prefix}id /uid /info\n\n"
+            f"<b>🔧 Filters</b>\n{prefix}filter <word> <reply> | {prefix}filters\n"
+            f"<b>📝 Notes</b>\n{prefix}save <name> <content> | #<name>\n\n"
+            f"<b>🎮 FF</b> {prefix}ffinfo 3941516359\n"
+            f"<b>🎵 Download</b> {prefix}download <spotify_url>\n"
+            f"<b>🤖 AI</b> {prefix}ai_on /ai_off /ai\n"
+        )
+        await q.message.reply_text(text, parse_mode="HTML")
     elif q.data == "admin":
-        await q.message.reply_text("Admin panel: /ban /warn /filter etc.")
+        await admin_panel(update, context)  # fallback
+    elif q.data == "admin_close":
+        try:
+            await q.message.delete()
+        except Exception:
+            await q.edit_message_text("✅ Closed")
+    elif q.data.startswith("admin_"):
+        # admin sub-buttons — show usage hint
+        hints = {
+            "admin_ban": "👮 <b>Ban</b>\nReply to user: <code>/ban</code>",
+            "admin_unban": "🔓 <b>Unban</b>\n<code>/unban &lt;user_id&gt;</code> or reply",
+            "admin_mute": "🔇 <b>Mute</b>\nReply to user: <code>/mute</code>",
+            "admin_warn": "⚠️ <b>Warn</b>\nReply: <code>/warn</code> (3 warns = mute)",
+            "admin_warns": "📋 <b>Warns</b>\n<code>/warns</code> (reply or self)",
+            "admin_filters": "🔧 <b>Filters</b>\n<code>/filter &lt;word&gt; &lt;reply&gt;</code> | <code>/filters</code>",
+            "admin_notes": "📝 <b>Notes</b>\n<code>/save &lt;name&gt; &lt;content&gt;</code> | <code>#name</code>",
+            "admin_save": "💾 <b>Save</b>\n<code>/save &lt;name&gt; &lt;content&gt;</code>",
+            "admin_locks": "🔒 <b>Locks</b>\n<code>/lock &lt;media/links&gt;</code> | <code>/locks</code>",
+            "admin_ai_on": "🤖 <b>AI ON</b>\n<code>/ai_on</code>",
+            "admin_ai_off": "🤖 <b>AI OFF</b>\n<code>/ai_off</code>",
+            "admin_model": "🧠 <b>Model</b>\n<code>/setmodel</code> or <code>/models</code>",
+            "admin_adminlist": "👥 <b>Admins</b>\n<code>/adminlist</code>",
+            "admin_addadmin": "➕ <b>Add Admin</b>\nReply: <code>/addadmin</code> or <code>/addadmin &lt;user_id&gt;</code>",
+            "admin_prefix": "⚙️ <b>Prefix</b>\n<code>/setprefix !</code> (/, !, ., ~, #, $)",
+        }
+        hint = hints.get(q.data, "Unknown")
+        await q.message.reply_text(hint, parse_mode="HTML")
     elif q.data.startswith("setmodel_"):
         new = q.data.replace("setmodel_", "")
         if new not in ALLOWED_MODELS:
@@ -478,6 +549,7 @@ def main():
                     app.add_handler(MessageHandler(tg_filters.Regex(rf"^{re.escape(p)}{n}(\s|$)"), func))
     cmd(["start"], start)
     cmd(["help", "commands", "cmd"], help_cmd)
+    cmd(["admin", "adminpanel", "panel"], admin_panel)
     cmd(["ban"], ban)
     cmd(["unban"], unban)
     cmd(["mute"], mute)
