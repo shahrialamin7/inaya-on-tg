@@ -59,12 +59,22 @@ class SpotiService:
         }
 
     def download(self, spotify_url: str, quality: str = None, with_lyrics: bool = None):
-        # This will use SpotiFLAC module if available, otherwise mock for demo
         q = quality or self.quality
         l = with_lyrics if with_lyrics is not None else self.lyrics
         if not HAS_MODULE:
             return {"success": False, "error": "SpotiFLAC module not installed. Run pip install SpotiFLAC and configure registry.", "url": spotify_url, "quality": q}
-        # Real usage (simplified):
-        # sf = _SpotiFLAC(registry=self.registry_url, quality=q, lyrics=l)
-        # return sf.download(spotify_url)
-        return {"success": True, "mock": True, "url": spotify_url, "quality": q, "lyrics": l, "note": "Module would download here"}
+        import tempfile, os, glob
+        # map app quality to SpotiFLAC quality
+        qmap = {"FLAC": "LOSSLESS", "HI_RES": "HI_RES", "320": "320", "256": "256", "128": "128"}
+        sflac_q = qmap.get(q, "LOSSLESS")
+        out_dir = tempfile.mkdtemp(prefix="spoti_")
+        try:
+            # Sync call — blocks until download finishes (handles extensions auto-sync)
+            _SpotiFLAC(spotify_url, out_dir, quality=sflac_q, embed_lyrics=l, log_level=20)
+            files = glob.glob(os.path.join(out_dir, "**", "*"), recursive=True)
+            audio = [f for f in files if os.path.isfile(f) and f.lower().endswith((".flac",".wav",".mp3",".m4a",".ogg",".opus"))]
+            if not audio:
+                return {"success": False, "error": "Download finished but no audio file found. Check URL or extension.", "url": spotify_url, "out_dir": out_dir}
+            return {"success": True, "url": spotify_url, "quality": q, "sflac_quality": sflac_q, "files": audio, "out_dir": out_dir}
+        except Exception as e:
+            return {"success": False, "error": f"SpotiFLAC error: {e}", "url": spotify_url, "out_dir": out_dir}

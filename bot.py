@@ -236,15 +236,52 @@ async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /download https://open.spotify.com/track/...")
         return
     url = context.args[0]
+    if "open.spotify.com" not in url:
+        await update.message.reply_text("❌ Invalid Spotify URL")
+        return
     from spoti_service import SpotiService
+    import asyncio, os
     svc = SpotiService()
     info = svc.info()
-    await update.message.reply_text(f"⬇️ Downloading {url}\nQuality: {info['quality']} | Providers: {len(info['providers'])}\nExtensions will fallback automatically...")
-    res = svc.download(url)
+    if not info.get("has_module"):
+        await update.message.reply_text("⚠️ SpotiFLAC module not installed on server. Contact admin.")
+        return
+    status = await update.message.reply_text(f"⬇️ Downloading {url}\nQuality: {info['quality']} | Providers: {', '.join(info['providers'])}\n⏳ This may take 30-60s (extension sync + download)...")
+    await context.bot.send_chat_action(update.effective_chat.id, "upload_audio")
+    try:
+        res = await asyncio.to_thread(svc.download, url)
+    except Exception as e:
+        log.exception("spoti download failed %s: %s", url, e)
+        await status.edit_text(f"❌ Error: {e}")
+        return
     if not res.get("success"):
-        await update.message.reply_text(f"⚠️ {res.get('error')}")
+        await status.edit_text(f"⚠️ {res.get('error')}")
+        return
+    files = res.get("files", [])
+    out_dir = res.get("out_dir", "")
+    # Send each audio file
+    for fp in files[:5]:  # limit 5 tracks (playlist)
+        try:
+            with open(fp, "rb") as f:
+                await context.bot.send_audio(chat_id=update.effective_chat.id, audio=f, title=os.path.basename(fp))
+        except Exception as e:
+            log.warning("send_audio %s failed: %s", fp, e)
+            try:
+                with open(fp, "rb") as f:
+                    await context.bot.send_document(chat_id=update.effective_chat.id, document=f)
+            except Exception as e2:
+                await update.message.reply_text(f"⚠️ Send failed for {os.path.basename(fp)}: {e2}")
+    # cleanup
+    try:
+        import shutil
+        if out_dir and os.path.exists(out_dir):
+            shutil.rmtree(out_dir, ignore_errors=True)
+    except Exception:
+        pass
+    if files:
+        await status.edit_text(f"✅ Done — sent {len(files)} file(s) ({res.get('sflac_quality')})")
     else:
-        await update.message.reply_text(f"✅ Queued (mock) — install SpotiFLAC module for real FLAC")
+        await status.edit_text("⚠️ No files to send")
 
 # --- AI ---
 async def ai_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
